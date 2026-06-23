@@ -1,0 +1,5 @@
+torch
+torchvision
+mpi4py
+pandas
+matplotlib

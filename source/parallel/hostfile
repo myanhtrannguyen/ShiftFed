@@ -1,0 +1,14 @@
+# Copy this file to hostfile when you run on multiple machines.
+# Each host must have the same project path, Python dependencies, and SSH access.
+#
+# Local one-machine test:
+# localhost slots=4
+#
+# Three-machine deployment example:
+# server-ip-or-hostname slots=1
+# client1-ip-or-hostname slots=1
+# client2-ip-or-hostname slots=1
+# client3-ip-or-hostname slots=1
+
+localhost slots=2
+192.168.243.249 slots=2
