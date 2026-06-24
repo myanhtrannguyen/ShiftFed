@@ -57,9 +57,9 @@ def parse_args() -> ExperimentConfig:
 
 
 def ensure_world_size(comm: MPI.Comm) -> None:
-    if comm.Get_size() != 4:
+    if comm.Get_size() < 2:
         if comm.Get_rank() == 0:
-            print("This experiment expects exactly 4 MPI processes: rank 0 server + 3 clients.")
+            print("This experiment expects at least 2 MPI processes: rank 0 server + at least 1 client.")
         raise SystemExit(2)
 
 
@@ -75,11 +75,11 @@ def run_sync_server(config: ExperimentConfig, comm: MPI.Comm, device: torch.devi
         round_start = time.perf_counter()
         state = state_dict_to_cpu(global_model.state_dict())
         
-        assigned_steps = {r: config.local_steps for r in DOMAIN_BY_RANK}
+        assigned_steps = {r: config.local_steps for r in range(1, comm.Get_size())}
         if config.load_balance and len(time_per_step) > 0:
             fastest_step_time = min(time_per_step.values())
             target_time = fastest_step_time * config.local_steps
-            for r in DOMAIN_BY_RANK:
+            for r in range(1, comm.Get_size()):
                 if time_per_step.get(r, fastest_step_time) > 0:
                     assigned_steps[r] = max(10, int(target_time / time_per_step.get(r, fastest_step_time)))
 
@@ -132,7 +132,7 @@ def run_sync_server(config: ExperimentConfig, comm: MPI.Comm, device: torch.devi
 
 
 def run_sync_client(config: ExperimentConfig, comm: MPI.Comm, rank: int, device: torch.device) -> None:
-    domain = DOMAIN_BY_RANK[rank]
+    domain = ALL_DOMAINS[(rank - 1) % len(ALL_DOMAINS)]
     loader = make_loader(config, domain, train=True)
     local_model = build_model(config.model).to(device)
     while True:
@@ -162,12 +162,13 @@ def run_async_server(config: ExperimentConfig, comm: MPI.Comm, device: torch.dev
 
     send_requests = {}
     time_per_step = {}
-    for rank in DOMAIN_BY_RANK:
+    client_ranks = range(1, comm.Get_size())
+    for rank in client_ranks:
         send_requests[rank] = comm.isend({"round": 1, "state": state_dict_to_cpu(global_model.state_dict()), "stop": False, "local_steps": config.local_steps}, dest=rank, tag=MODEL_TAG)
 
     completed_updates: List[Tuple[Dict[str, object], float]] = []
-    target_updates = config.rounds * len(DOMAIN_BY_RANK)
-    next_round_by_rank = {rank: 1 for rank in DOMAIN_BY_RANK}
+    target_updates = config.rounds * len(client_ranks)
+    next_round_by_rank = {rank: 1 for rank in client_ranks}
 
     while len(completed_updates) < target_updates:
         status = MPI.Status()
@@ -241,7 +242,7 @@ def run_async_server(config: ExperimentConfig, comm: MPI.Comm, device: torch.dev
 
 
 def run_async_client(config: ExperimentConfig, comm: MPI.Comm, rank: int, device: torch.device) -> None:
-    domain = DOMAIN_BY_RANK[rank]
+    domain = ALL_DOMAINS[(rank - 1) % len(ALL_DOMAINS)]
     loader = make_loader(config, domain, train=True)
     local_model = build_model(config.model).to(device)
     while True:
