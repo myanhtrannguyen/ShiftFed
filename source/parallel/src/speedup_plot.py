@@ -11,25 +11,41 @@ def parse_args():
     parser.add_argument("--x-cores", type=int, default=4, help="X = physical cores of the machine")
     parser.add_argument("--n", type=int, default=5000, help="N data size (base steps)")
     parser.add_argument("--mpirun", default="mpirun")
+    parser.add_argument("--hostfile", default="", help="Path to hostfile for MPI cluster")
+    parser.add_argument("--oversubscribe", action="store_true", help="Allow running more processes than physical cores")
     parser.add_argument("--out-png", default="speedup_plot.png")
+    parser.add_argument("--async-mode", action="store_true")
+    parser.add_argument("--load-balance", action="store_true", help="Enable dynamic load balancing")
     return parser.parse_args()
 
-def run_experiment(np, total_steps, mpirun):
-    here = Path(__file__).resolve().parent
-    log_dir = here / "outputs" / "speedup_check"
+def run_experiment(np, total_steps, args):
+    # Use relative paths to avoid breaking symlinks across different MPI nodes
+    log_dir = Path("outputs") / "speedup_check"
     log_dir.mkdir(parents=True, exist_ok=True)
     
     workers = np - 1
     local_steps = total_steps // workers
     
     cmd = [
-        mpirun,
-        "-np", str(np),
-        sys.executable, str(here / "parallel_fedavg_mpi.py"),
+        args.mpirun,
+        "-np", str(np)
+    ]
+    if args.hostfile:
+        cmd.extend(["--hostfile", args.hostfile])
+    if args.oversubscribe:
+        cmd.append("--oversubscribe")
+        
+    cmd.extend([
+        sys.executable, "parallel_fedavg_mpi.py",
         "--rounds", "3",  # Keep rounds small, we just want to measure speedup of local computation
         "--local-steps", str(local_steps),
-        "--log-dir", str(log_dir)
-    ]
+        "--log-dir", str(log_dir),
+        "--download"
+    ])
+    if args.async_mode:
+        cmd.append("--async-mode")
+    if args.load_balance:
+        cmd.append("--load-balance")
     
     start_time = time.perf_counter()
     subprocess.run(cmd, check=True)
@@ -65,6 +81,10 @@ def main():
         worker_counts.append(w)
         w *= 2
         
+    # Đảm bảo 2X luôn có mặt ở cuối cùng theo đúng đề bài
+    if worker_counts[-1] != max_workers:
+        worker_counts.append(max_workers)
+        
     total_data = 2 * args.n
     print(f"Tổng kích thước dữ liệu mô phỏng = 2*N = {total_data}")
     print(f"Số lượng nhân vật lý (X) = {X}")
@@ -73,15 +93,25 @@ def main():
     times_with_comm = []
     times_without_comm = []
     
-    for w in worker_counts:
-        np = w + 1 # Tổng số tiến trình thực tế của MPI = 1 Server + w Workers
-        print(f"\n[*] Đang chạy với {w} workers (Tổng tiến trình MPI={np})...")
-        t_total, t_compute = run_experiment(np, total_data, args.mpirun)
-        times_with_comm.append(t_total)
-        times_without_comm.append(t_compute)
-        print(f"    -> Có truyền thông (Total Time): {t_total:.2f}s")
-        print(f"    -> Không truyền thông (Compute Only): {t_compute:.2f}s")
-        
+    actual_worker_counts = []
+    
+    try:
+        for w in worker_counts:
+            np_val = w + 1 # Tổng số tiến trình thực tế của MPI = 1 Server + w Workers
+            print(f"\n[*] Đang chạy với {w} workers (Tổng tiến trình MPI={np_val})...")
+            t_total, t_compute = run_experiment(np_val, total_data, args)
+            times_with_comm.append(t_total)
+            times_without_comm.append(t_compute)
+            actual_worker_counts.append(w)
+            print(f"    -> Có truyền thông (Total Time): {t_total:.2f}s")
+            print(f"    -> Không truyền thông (Compute Only): {t_compute:.2f}s")
+    except (KeyboardInterrupt, subprocess.CalledProcessError) as e:
+        print(f"\n[!] Bị ngắt đột ngột (Lỗi máy ảo sập hoặc Ctrl+C).")
+        print("[!] Đang tiến hành vẽ biểu đồ với các mốc đã chạy thành công...")
+        if not times_with_comm:
+            print("Chưa có mốc nào hoàn thành. Hủy vẽ biểu đồ.")
+            sys.exit(0)
+            
     # Tính toán độ tăng tốc (Speedup)
     # Speedup = Time(1 worker) / Time(w workers)
     t1_with = times_with_comm[0]
@@ -94,23 +124,23 @@ def main():
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
     
     # Biểu đồ 1: Thời gian chạy
-    ax1.plot(worker_counts, times_with_comm, 'o-', color='salmon', linewidth=2, label='Có truyền thông (Wall Time)')
-    ax1.plot(worker_counts, times_without_comm, 's--', color='skyblue', linewidth=2, label='Không truyền thông (Compute Only)')
-    ax1.set_xlabel('Số lượng tiến trình (Workers)', fontsize=12)
-    ax1.set_ylabel('Thời gian chạy (Giây)', fontsize=12)
-    ax1.set_title('Thời gian chạy theo số lượng tiến trình', fontsize=14, fontweight='bold')
-    ax1.set_xticks(worker_counts)
+    ax1.plot(actual_worker_counts, times_with_comm, 'o-', color='salmon', linewidth=2, label='With Communication (Wall Time)')
+    ax1.plot(actual_worker_counts, times_without_comm, 's--', color='skyblue', linewidth=2, label='Without Communication (Compute Only)')
+    ax1.set_xlabel('Number of Processes (Workers)', fontsize=12)
+    ax1.set_ylabel('Execution Time (Seconds)', fontsize=12)
+    ax1.set_title('Execution Time vs Number of Processes', fontsize=14, fontweight='bold')
+    ax1.set_xticks(actual_worker_counts)
     ax1.grid(True, linestyle=':', alpha=0.7)
     ax1.legend(fontsize=10)
     
     # Biểu đồ 2: Độ tăng tốc (Speedup)
-    ax2.plot(worker_counts, speedup_with, 'o-', color='salmon', linewidth=2, label='Speedup (Có truyền thông)')
-    ax2.plot(worker_counts, speedup_without, 's--', color='skyblue', linewidth=2, label='Speedup (Không truyền thông)')
-    ax2.plot(worker_counts, worker_counts, 'k:', linewidth=2, label='Tăng tốc lý tưởng (Ideal Speedup = p)')
-    ax2.set_xlabel('Số lượng tiến trình (Workers)', fontsize=12)
-    ax2.set_ylabel('Độ tăng tốc', fontsize=12)
-    ax2.set_title('Biểu đồ Độ tăng tốc (Speedup)', fontsize=14, fontweight='bold')
-    ax2.set_xticks(worker_counts)
+    ax2.plot(actual_worker_counts, speedup_with, 'o-', color='salmon', linewidth=2, label='Speedup (With Comm)')
+    ax2.plot(actual_worker_counts, speedup_without, 's--', color='skyblue', linewidth=2, label='Speedup (Compute Only)')
+    ax2.plot(actual_worker_counts, actual_worker_counts, 'k:', linewidth=2, label='Ideal Speedup (S = p)')
+    ax2.set_xlabel('Number of Processes (Workers)', fontsize=12)
+    ax2.set_ylabel('Speedup Factor', fontsize=12)
+    ax2.set_title('Speedup vs Number of Processes', fontsize=14, fontweight='bold')
+    ax2.set_xticks(actual_worker_counts)
     ax2.grid(True, linestyle=':', alpha=0.7)
     ax2.legend(fontsize=10)
     

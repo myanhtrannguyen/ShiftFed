@@ -8,6 +8,7 @@ for a non-blocking Isend/Irecv server loop.
 from __future__ import annotations
 
 import argparse
+import os
 import socket
 import time
 from pathlib import Path
@@ -132,7 +133,14 @@ def run_sync_server(config: ExperimentConfig, comm: MPI.Comm, device: torch.devi
 
 
 def run_sync_client(config: ExperimentConfig, comm: MPI.Comm, rank: int, device: torch.device) -> None:
-    domain = ALL_DOMAINS[(rank - 1) % len(ALL_DOMAINS)]
+    hostname = socket.gethostname()
+    if "worker2" in hostname:
+        domain = "svhn"
+    elif "slave1" in hostname:
+        domain = "mnist"
+    else:
+        domain = "usps"
+        
     loader = make_loader(config, domain, train=True)
     local_model = build_model(config.model).to(device)
     while True:
@@ -182,13 +190,12 @@ def run_async_server(config: ExperimentConfig, comm: MPI.Comm, device: torch.dev
 
         global_model.load_state_dict(fedavg([(state_dict_to_cpu(global_model.state_dict()), 1.0), (update["state"], update["metrics"]["samples"])]))
 
-        async_round = max(item[0]["round"] for item in completed_updates)
         eval_metrics = evaluate_model(global_model, test_loaders, device)
         rows.append(
             {
                 "mode": "mpi_async",
                 "model": config.model,
-                "round": async_round,
+                "round": update["round"],
                 "rank": rank,
                 "domain": update["domain"],
                 "client_loss": update["metrics"]["loss"],
@@ -242,7 +249,14 @@ def run_async_server(config: ExperimentConfig, comm: MPI.Comm, device: torch.dev
 
 
 def run_async_client(config: ExperimentConfig, comm: MPI.Comm, rank: int, device: torch.device) -> None:
-    domain = ALL_DOMAINS[(rank - 1) % len(ALL_DOMAINS)]
+    hostname = socket.gethostname()
+    if "worker2" in hostname:
+        domain = "svhn"
+    elif "slave1" in hostname:
+        domain = "mnist"
+    else:
+        domain = "usps"
+        
     loader = make_loader(config, domain, train=True)
     local_model = build_model(config.model).to(device)
     while True:
@@ -275,7 +289,35 @@ def main() -> None:
     device = torch.device(config.device if torch.cuda.is_available() or config.device == "cpu" else "cpu")
 
     hostname = socket.gethostname()
-    print(f"[INIT] Rank {rank} started on host: {hostname}", flush=True)
+    
+    if rank == 0:
+        print(f"[INIT] Rank {rank} started on host: {hostname} (SERVER)", flush=True)
+    else:
+        if "worker2" in hostname:
+            domain_print = "SVHN"
+        elif "slave1" in hostname:
+            domain_print = "MNIST"
+        else:
+            domain_print = "USPS"
+        print(f"[INIT] Rank {rank} started on host: {hostname} (Dataset: {domain_print})", flush=True)
+
+    if rank > 0:
+        if "worker2" in hostname:
+            config.data_dir = "./data"
+        else:
+            config.data_dir = "/tmp/fl_data"
+
+    if config.download:
+        local_rank = int(os.environ.get("OMPI_COMM_WORLD_LOCAL_RANK", "0"))
+        if local_rank == 0:
+            if "worker2" in hostname:
+                dl_domain = "svhn"
+            elif "slave1" in hostname:
+                dl_domain = "mnist"
+            else:
+                dl_domain = "usps"
+            make_loader(config, dl_domain, train=True)
+        comm.Barrier()
 
     if rank == 0:
         output = run_async_server(config, comm, device) if config.async_mode else run_sync_server(config, comm, device)

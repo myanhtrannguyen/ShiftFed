@@ -14,8 +14,8 @@ from torch import nn
 from torch.utils.data import DataLoader, Dataset, Subset
 
 
-DOMAIN_BY_RANK = {1: "mnist", 2: "svhn", 3: "usps"}
-ALL_DOMAINS = ("mnist", "svhn", "usps")
+DOMAIN_BY_RANK = {1: "svhn", 2: "mnist", 3: "usps"}
+ALL_DOMAINS = ("svhn", "mnist", "usps")
 
 
 @dataclass

@@ -13,24 +13,34 @@ def parse_args():
     parser.add_argument("--rounds", type=int, default=30, help="Fixed N (rounds) for the program")
     parser.add_argument("--local-steps", type=int, default=100, help="Local steps (granularity)")
     parser.add_argument("--mpirun", default="mpirun")
+    parser.add_argument("--hostfile", default="", help="Path to hostfile for MPI cluster")
+    parser.add_argument("--oversubscribe", action="store_true", help="Allow running more processes than physical cores")
     parser.add_argument("--out-png", default="granularity_plot.png")
     parser.add_argument("--async-mode", action="store_true")
     parser.add_argument("--load-balance", action="store_true", help="Enable dynamic load balancing")
     return parser.parse_args()
 
 def run_experiment(args):
-    here = Path(__file__).resolve().parent
-    log_dir = here / "outputs" / "granularity_check"
+    # Use relative paths to avoid breaking symlinks across different MPI nodes
+    log_dir = Path("outputs") / f"granularity_steps_{args.local_steps}"
     log_dir.mkdir(parents=True, exist_ok=True)
     
     cmd = [
         args.mpirun,
-        "-np", str(args.np),
-        sys.executable, str(here / "parallel_fedavg_mpi.py"),
+        "-np", str(args.np)
+    ]
+    if args.hostfile:
+        cmd.extend(["--hostfile", args.hostfile])
+    if args.oversubscribe:
+        cmd.append("--oversubscribe")
+        
+    cmd.extend([
+        sys.executable, "parallel_fedavg_mpi.py",
         "--rounds", str(args.rounds),
         "--local-steps", str(args.local_steps),
-        "--log-dir", str(log_dir)
-    ]
+        "--log-dir", str(log_dir),
+        "--download"
+    ])
     if args.async_mode:
         cmd.append("--async-mode")
     if args.load_balance:
@@ -87,13 +97,13 @@ def main():
     x = np.arange(len(ranks))
     width = 0.6
     
-    p1 = ax.bar(x, compute_times, width, label='Thời gian tính toán (Compute Time)', color='skyblue', edgecolor='black')
-    p2 = ax.bar(x, comm_times, width, bottom=compute_times, label='Thời gian truyền thông/Rảnh rỗi (Comm/Idle Time)', color='salmon', edgecolor='black')
+    p1 = ax.bar(x, compute_times, width, label='Compute Time', color='skyblue', edgecolor='black')
+    p2 = ax.bar(x, comm_times, width, bottom=compute_times, label='Communication/Idle Time', color='salmon', edgecolor='black')
     
-    ax.set_ylabel('Thời gian (Giây)', fontsize=12)
-    ax.set_xlabel('Tiến trình (Rank)', fontsize=12)
-    mode_str = "CÓ Load Balance" if args.load_balance else "KHÔNG Load Balance"
-    ax.set_title(f'Biểu đồ Thời gian chạy của từng Tiến trình ({mode_str})\nĐộ lệch thời gian rảnh lớn nhất: {diff_percent:.2f}%', fontsize=14, fontweight='bold')
+    ax.set_ylabel('Time (Seconds)', fontsize=12)
+    ax.set_xlabel('Client Rank', fontsize=12)
+    mode_str = "WITH Load Balancing" if args.load_balance else "NO Load Balancing"
+    ax.set_title(f'Execution Time by Client ({mode_str})\nMax Idle Time Difference: {diff_percent:.2f}%', fontsize=14, fontweight='bold')
     ax.set_xticks(x)
     ax.set_xticklabels([f"Client {r}" for r in ranks])
     ax.legend(fontsize=11)
@@ -107,24 +117,24 @@ def main():
             
     plt.tight_layout()
     plt.savefig(args.out_png, dpi=300)
-    print(f"\n[+] Đã lưu biểu đồ vào: {args.out_png}")
+    print(f"\n[+] Saved plot to: {args.out_png}")
     
     print("\n" + "="*50)
-    print("PHÂN TÍCH CÂN BẰNG TẢI (LOAD BALANCING ANALYSIS)")
+    print("LOAD BALANCING ANALYSIS")
     print("="*50)
-    print(f"Độ lệch thời gian rảnh rỗi lớn nhất: {diff_percent:.2f}%")
+    print(f"Max idle time difference: {diff_percent:.2f}%")
     
     if is_balanced:
-        print("Kết luận: HỆ THỐNG ĐÃ CÂN BẰNG TẢI TỐT.")
-        print("Mức độ chênh lệch < 25%, độ mịn (granularity) hiện tại là phù hợp.")
+        print("Conclusion: SYSTEM IS WELL BALANCED.")
+        print("Difference < 25%, current granularity is appropriate.")
     else:
-        print("Kết luận: HỆ THỐNG MẤT CÂN BẰNG TẢI!")
-        print("Mức độ chênh lệch > 25%, có sự lãng phí tài nguyên lớn ở một số tiến trình.")
-        print("\nĐỀ XUẤT ĐIỀU CHỈNH ĐỘ MỊN (GRANULARITY):")
-        print("1. Chỉnh độ mịn tinh hơn (Finer granularity):")
-        print(f"   Giảm --local-steps xuống thấp hơn (VD: --local-steps {max(10, args.local_steps//2)}) để các máy giao tiếp thường xuyên hơn.")
-        print("2. Dùng Load Balancing tự động:")
-        print("   Hãy thêm cờ --load-balance khi chạy lệnh để Server tự động tính toán độ mịn (số step) riêng cho từng tiến trình dựa trên tốc độ thực tế của chúng.")
+        print("Conclusion: SYSTEM IS IMBALANCED!")
+        print("Difference > 25%, significant resource waste on some clients.")
+        print("\nSUGGESTED GRANULARITY ADJUSTMENTS:")
+        print("1. Finer granularity:")
+        print(f"   Decrease --local-steps (e.g. --local-steps {max(10, args.local_steps//2)}) to communicate more frequently.")
+        print("2. Automatic Load Balancing:")
+        print("   Use the --load-balance flag to let the Server dynamically assign steps based on actual client speed.")
         
 if __name__ == "__main__":
     main()

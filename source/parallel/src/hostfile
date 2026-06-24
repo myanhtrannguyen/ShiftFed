@@ -10,7 +10,7 @@
 # client2-ip-or-hostname slots=1
 # client3-ip-or-hostname slots=1
 
-localhost slots=3
-# slave1 slots=1
-slave2 slots=1
+localhost slots=4
+slave2 slots=4
+slave1 slots=4
 
