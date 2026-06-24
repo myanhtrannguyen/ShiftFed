@@ -8,6 +8,7 @@ for a non-blocking Isend/Irecv server loop.
 from __future__ import annotations
 
 import argparse
+import socket
 import time
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -141,21 +142,17 @@ def run_async_server(config: ExperimentConfig, comm: MPI.Comm, device: torch.dev
     rows = []
     total_start = time.perf_counter()
 
+    send_requests = {}
     for rank in DOMAIN_BY_RANK:
-        comm.isend({"round": 1, "state": state_dict_to_cpu(global_model.state_dict()), "stop": False}, dest=rank, tag=MODEL_TAG)
-
-    pending: List[MPI.Request] = []
-    buffers: List[Dict[str, object]] = []
-    for rank in DOMAIN_BY_RANK:
-        buffers.append({})
-        pending.append(comm.irecv(source=rank, tag=UPDATE_TAG))
+        send_requests[rank] = comm.isend({"round": 1, "state": state_dict_to_cpu(global_model.state_dict()), "stop": False}, dest=rank, tag=MODEL_TAG)
 
     completed_updates: List[Tuple[Dict[str, object], float]] = []
     target_updates = config.rounds * len(DOMAIN_BY_RANK)
     next_round_by_rank = {rank: 1 for rank in DOMAIN_BY_RANK}
 
     while len(completed_updates) < target_updates:
-        index, update = MPI.Request.waitany(pending)
+        status = MPI.Status()
+        update = comm.recv(source=MPI.ANY_SOURCE, tag=UPDATE_TAG, status=status)
         recv_time = time.perf_counter()
         rank = int(update["rank"])
         completed_updates.append((update, recv_time))
@@ -185,8 +182,13 @@ def run_async_server(config: ExperimentConfig, comm: MPI.Comm, device: torch.dev
         )
 
         next_round_by_rank[rank] += 1
+        
+        # Đợi request gửi trước đó hoàn tất để tránh bị giải phóng vùng nhớ
+        if rank in send_requests:
+            send_requests[rank].Wait()
+
         if next_round_by_rank[rank] <= config.rounds:
-            comm.isend(
+            send_requests[rank] = comm.isend(
                 {
                     "round": next_round_by_rank[rank],
                     "state": state_dict_to_cpu(global_model.state_dict()),
@@ -195,12 +197,13 @@ def run_async_server(config: ExperimentConfig, comm: MPI.Comm, device: torch.dev
                 dest=rank,
                 tag=MODEL_TAG,
             )
-            pending[index] = comm.irecv(source=rank, tag=UPDATE_TAG)
         else:
-            comm.isend({"round": next_round_by_rank[rank], "state": None, "stop": True}, dest=rank, tag=STOP_TAG)
-            pending[index] = MPI.REQUEST_NULL
-
-    MPI.Request.waitall([request for request in pending if request != MPI.REQUEST_NULL])
+            send_requests[rank] = comm.isend({"round": next_round_by_rank[rank], "state": None, "stop": True}, dest=rank, tag=STOP_TAG)
+    
+    # Đợi toàn bộ tin nhắn đã được gửi đi an toàn trước khi thoát server
+    for req in send_requests.values():
+        req.Wait()
+        
     log_path = Path(config.log_dir) / f"mpi_async_{config.model}_{config.rounds}r.csv"
     append_csv(log_path, rows)
     return log_path
@@ -237,6 +240,9 @@ def main() -> None:
     rank = comm.Get_rank()
     set_seed(config.seed + rank)
     device = torch.device(config.device if torch.cuda.is_available() or config.device == "cpu" else "cpu")
+
+    hostname = socket.gethostname()
+    print(f"[INIT] Rank {rank} started on host: {hostname}", flush=True)
 
     if rank == 0:
         output = run_async_server(config, comm, device) if config.async_mode else run_sync_server(config, comm, device)
