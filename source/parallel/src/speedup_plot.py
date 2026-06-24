@@ -5,6 +5,8 @@ import time
 from pathlib import Path
 import matplotlib.pyplot as plt
 import csv
+import json
+import os
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -16,6 +18,7 @@ def parse_args():
     parser.add_argument("--out-png", default="speedup_plot.png")
     parser.add_argument("--async-mode", action="store_true")
     parser.add_argument("--load-balance", action="store_true", help="Enable dynamic load balancing")
+    parser.add_argument("--plot-only", action="store_true", help="Only plot from previously saved speedup data")
     return parser.parse_args()
 
 def run_experiment(np, total_steps, args):
@@ -90,27 +93,53 @@ def main():
     print(f"Số lượng nhân vật lý (X) = {X}")
     print(f"Chạy nghiệm với số tiến trình công nhân: {worker_counts}")
     
+    results_file = Path("outputs") / "speedup_check" / "speedup_results.json"
+    results_file.parent.mkdir(parents=True, exist_ok=True)
+    
     times_with_comm = []
     times_without_comm = []
-    
     actual_worker_counts = []
     
-    try:
-        for w in worker_counts:
-            np_val = w + 1 # Tổng số tiến trình thực tế của MPI = 1 Server + w Workers
-            print(f"\n[*] Đang chạy với {w} workers (Tổng tiến trình MPI={np_val})...")
-            t_total, t_compute = run_experiment(np_val, total_data, args)
-            times_with_comm.append(t_total)
-            times_without_comm.append(t_compute)
-            actual_worker_counts.append(w)
-            print(f"    -> Có truyền thông (Total Time): {t_total:.2f}s")
-            print(f"    -> Không truyền thông (Compute Only): {t_compute:.2f}s")
-    except (KeyboardInterrupt, subprocess.CalledProcessError) as e:
-        print(f"\n[!] Bị ngắt đột ngột (Lỗi máy ảo sập hoặc Ctrl+C).")
-        print("[!] Đang tiến hành vẽ biểu đồ với các mốc đã chạy thành công...")
-        if not times_with_comm:
-            print("Chưa có mốc nào hoàn thành. Hủy vẽ biểu đồ.")
-            sys.exit(0)
+    if args.plot_only:
+        print("[*] Chế độ vẽ lại (Plot Only) được bật. Đang đọc dữ liệu đã lưu...")
+        if results_file.exists():
+            with open(results_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                times_with_comm = data.get("times_with_comm", [])
+                times_without_comm = data.get("times_without_comm", [])
+                actual_worker_counts = data.get("actual_worker_counts", [])
+            print(f"Đã load {len(actual_worker_counts)} mốc dữ liệu thành công.")
+        else:
+            print(f"[!] Không tìm thấy file dữ liệu: {results_file}")
+            sys.exit(1)
+    else:
+        try:
+            for w in worker_counts:
+                np_val = w + 1 # Tổng số tiến trình thực tế của MPI = 1 Server + w Workers
+                print(f"\n[*] Đang chạy với {w} workers (Tổng tiến trình MPI={np_val})...")
+                t_total, t_compute = run_experiment(np_val, total_data, args)
+                times_with_comm.append(t_total)
+                times_without_comm.append(t_compute)
+                actual_worker_counts.append(w)
+                print(f"    -> Có truyền thông (Total Time): {t_total:.2f}s")
+                print(f"    -> Không truyền thông (Compute Only): {t_compute:.2f}s")
+                
+                # TỰ ĐỘNG LƯU SAU MỖI BƯỚC CHẠY ĐỂ CHỐNG MẤT DỮ LIỆU
+                with open(results_file, "w", encoding="utf-8") as f:
+                    json.dump({
+                        "times_with_comm": times_with_comm,
+                        "times_without_comm": times_without_comm,
+                        "actual_worker_counts": actual_worker_counts
+                    }, f, indent=4)
+                print("    -> Đã tự động lưu sao lưu kết quả.")
+                
+        except (KeyboardInterrupt, subprocess.CalledProcessError) as e:
+            print(f"\n[!] Bị ngắt đột ngột (Lỗi máy ảo sập hoặc Ctrl+C).")
+            print("[!] Đang tiến hành vẽ biểu đồ với các mốc đã chạy thành công...")
+            
+    if not times_with_comm:
+        print("Chưa có mốc nào hoàn thành. Hủy vẽ biểu đồ.")
+        sys.exit(0)
             
     # Tính toán độ tăng tốc (Speedup)
     # Speedup = Time(1 worker) / Time(w workers)

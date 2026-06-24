@@ -305,7 +305,8 @@ def main() -> None:
         if "worker2" in hostname:
             config.data_dir = "./data"
         else:
-            config.data_dir = "/tmp/fl_data"
+            # Dùng /var/tmp thay vì /tmp để dữ liệu không bị xoá khi sập/reset máy ảo
+            config.data_dir = "/var/tmp/fl_data"
 
     if config.download:
         local_rank = int(os.environ.get("OMPI_COMM_WORLD_LOCAL_RANK", "0"))
