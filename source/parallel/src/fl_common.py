@@ -33,6 +33,7 @@ class ExperimentConfig:
     train_subset: int = 0
     test_subset: int = 2000
     async_mode: bool = False
+    load_balance: bool = False
     device: str = "cpu"
 
 
@@ -214,6 +215,7 @@ def train_fixed_steps(
     loader: DataLoader,
     config: ExperimentConfig,
     device: torch.device,
+    local_steps: int | None = None,
 ) -> Dict[str, float]:
     model.train()
     model.to(device)
@@ -226,7 +228,8 @@ def train_fixed_steps(
     steps_done = 0
     start = time.perf_counter()
 
-    for _ in range(config.local_steps):
+    steps_to_run = local_steps if local_steps is not None else config.local_steps
+    for _ in range(steps_to_run):
         try:
             images, labels = next(iterator)
         except StopIteration:

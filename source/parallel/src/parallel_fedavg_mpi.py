@@ -51,6 +51,7 @@ def parse_args() -> ExperimentConfig:
     parser.add_argument("--train-subset", type=int, default=0)
     parser.add_argument("--test-subset", type=int, default=2000)
     parser.add_argument("--async-mode", action="store_true")
+    parser.add_argument("--load-balance", action="store_true")
     parser.add_argument("--device", default="cpu")
     return ExperimentConfig(**vars(parser.parse_args()))
 
@@ -68,15 +69,31 @@ def run_sync_server(config: ExperimentConfig, comm: MPI.Comm, device: torch.devi
     rows = []
     total_start = time.perf_counter()
 
+    time_per_step = {}
+
     for round_idx in range(1, config.rounds + 1):
         round_start = time.perf_counter()
         state = state_dict_to_cpu(global_model.state_dict())
+        
+        assigned_steps = {r: config.local_steps for r in DOMAIN_BY_RANK}
+        if config.load_balance and len(time_per_step) > 0:
+            fastest_step_time = min(time_per_step.values())
+            target_time = fastest_step_time * config.local_steps
+            for r in DOMAIN_BY_RANK:
+                if time_per_step.get(r, fastest_step_time) > 0:
+                    assigned_steps[r] = max(10, int(target_time / time_per_step.get(r, fastest_step_time)))
+
         comm_start = time.perf_counter()
-        comm.bcast({"round": round_idx, "state": state, "stop": False}, root=0)
+        comm.bcast({"round": round_idx, "state": state, "stop": False, "local_steps_dict": assigned_steps}, root=0)
         gathered = comm.gather(None, root=0)
         communication_time = time.perf_counter() - comm_start
 
         updates = [item for item in gathered[1:] if item is not None]
+        for item in updates:
+            r = item["rank"]
+            if item["metrics"]["steps"] > 0:
+                time_per_step[r] = item["metrics"]["compute_time"] / item["metrics"]["steps"]
+
         weighted_states = [(item["state"], item["metrics"]["samples"]) for item in updates]
         global_model.load_state_dict(fedavg(weighted_states))
         eval_metrics = evaluate_model(global_model, test_loaders, device)
@@ -124,7 +141,8 @@ def run_sync_client(config: ExperimentConfig, comm: MPI.Comm, rank: int, device:
             break
         comm_start = time.perf_counter()
         local_model.load_state_dict(payload["state"])
-        metrics = train_fixed_steps(local_model, loader, config, device)
+        local_steps = payload.get("local_steps_dict", {}).get(rank, config.local_steps)
+        metrics = train_fixed_steps(local_model, loader, config, device, local_steps=local_steps)
         update = {
             "rank": rank,
             "domain": domain,
@@ -143,8 +161,9 @@ def run_async_server(config: ExperimentConfig, comm: MPI.Comm, device: torch.dev
     total_start = time.perf_counter()
 
     send_requests = {}
+    time_per_step = {}
     for rank in DOMAIN_BY_RANK:
-        send_requests[rank] = comm.isend({"round": 1, "state": state_dict_to_cpu(global_model.state_dict()), "stop": False}, dest=rank, tag=MODEL_TAG)
+        send_requests[rank] = comm.isend({"round": 1, "state": state_dict_to_cpu(global_model.state_dict()), "stop": False, "local_steps": config.local_steps}, dest=rank, tag=MODEL_TAG)
 
     completed_updates: List[Tuple[Dict[str, object], float]] = []
     target_updates = config.rounds * len(DOMAIN_BY_RANK)
@@ -156,6 +175,10 @@ def run_async_server(config: ExperimentConfig, comm: MPI.Comm, device: torch.dev
         recv_time = time.perf_counter()
         rank = int(update["rank"])
         completed_updates.append((update, recv_time))
+
+        if update["metrics"]["steps"] > 0:
+            time_per_step[rank] = update["metrics"]["compute_time"] / update["metrics"]["steps"]
+
         global_model.load_state_dict(fedavg([(state_dict_to_cpu(global_model.state_dict()), 1.0), (update["state"], update["metrics"]["samples"])]))
 
         async_round = max(item[0]["round"] for item in completed_updates)
@@ -188,11 +211,19 @@ def run_async_server(config: ExperimentConfig, comm: MPI.Comm, device: torch.dev
             send_requests[rank].Wait()
 
         if next_round_by_rank[rank] <= config.rounds:
+            assigned_steps = config.local_steps
+            if config.load_balance and len(time_per_step) > 0:
+                fastest_step_time = min(time_per_step.values())
+                if time_per_step.get(rank, fastest_step_time) > 0:
+                    target_time = fastest_step_time * config.local_steps
+                    assigned_steps = max(10, int(target_time / time_per_step.get(rank, fastest_step_time)))
+
             send_requests[rank] = comm.isend(
                 {
                     "round": next_round_by_rank[rank],
                     "state": state_dict_to_cpu(global_model.state_dict()),
                     "stop": False,
+                    "local_steps": assigned_steps,
                 },
                 dest=rank,
                 tag=MODEL_TAG,
@@ -220,7 +251,8 @@ def run_async_client(config: ExperimentConfig, comm: MPI.Comm, rank: int, device
             break
         comm_start = time.perf_counter()
         local_model.load_state_dict(payload["state"])
-        metrics = train_fixed_steps(local_model, loader, config, device)
+        local_steps = payload.get("local_steps", config.local_steps)
+        metrics = train_fixed_steps(local_model, loader, config, device, local_steps=local_steps)
         update = {
             "rank": rank,
             "domain": domain,
