@@ -66,16 +66,16 @@ If the system is unbalanced, you can either:
 ---
 
 ## 4. Speedup Analysis
-To measure the parallel speedup (Strong Scaling), we fix the *total* data size across the entire program to $2 \times N$ (e.g., $N=5000$, total = 10000 steps). We then vary the number of worker processes from $1, 2, 4, 8, \dots, 2X$ (where $X$ is the total number of physical cores).
+To measure the parallel speedup (Strong Scaling), we run the program for $N$ communication rounds (e.g., $N=30$, identical to normal training) and fix the total computation workload per round across the cluster to $2 \times \text{local\_steps}$. We then vary the number of worker processes from $1, 2, 4, 8, \dots, 2X$ (where $X$ is the total number of physical cores).
 
 Assuming $X = 12$ physical cores:
 
 ```bash
-python3.10 speedup_plot.py --x-cores 12 --n 5000
+python3.10 speedup_plot.py --x-cores 12 --n 30
 ```
 
 **What it does:**
-- Automatically divides the fixed total workload (`2*N` local steps) evenly among the current number of active workers.
+- Runs $N=30$ rounds (`--rounds 30`) and automatically divides the fixed total local computation steps per round evenly among the current number of active workers (`local_steps = (2 * base_local_steps) // workers`).
 - Measures both Wall Time (with communication) and Compute Time (without communication) as the number of processes scales up.
 - Generates `speedup_plot.png` containing two subplots:
   1. **Execution Time vs. Workers** (showing time decreasing).

@@ -53,6 +53,7 @@ def parse_args() -> ExperimentConfig:
     parser.add_argument("--test-subset", type=int, default=2000)
     parser.add_argument("--async-mode", action="store_true")
     parser.add_argument("--load-balance", action="store_true")
+    parser.add_argument("--use-shared-folder", action="store_true", help="Use shared folder directly without copying or redirecting to /var/tmp")
     parser.add_argument("--device", default="cpu")
     return ExperimentConfig(**vars(parser.parse_args()))
 
@@ -62,6 +63,14 @@ def ensure_world_size(comm: MPI.Comm) -> None:
         if comm.Get_rank() == 0:
             print("This experiment expects at least 2 MPI processes: rank 0 server + at least 1 client.")
         raise SystemExit(2)
+
+
+def get_domain_for_hostname(hostname: str) -> str:
+    if "worker2" in hostname:
+        return "svhn"
+    if "slave1" in hostname:
+        return "usps"
+    return "mnist"
 
 
 def run_sync_server(config: ExperimentConfig, comm: MPI.Comm, device: torch.device) -> Path:
@@ -134,12 +143,7 @@ def run_sync_server(config: ExperimentConfig, comm: MPI.Comm, device: torch.devi
 
 def run_sync_client(config: ExperimentConfig, comm: MPI.Comm, rank: int, device: torch.device) -> None:
     hostname = socket.gethostname()
-    if "worker2" in hostname:
-        domain = "svhn"
-    elif "slave1" in hostname:
-        domain = "mnist"
-    else:
-        domain = "usps"
+    domain = get_domain_for_hostname(hostname)
         
     loader = make_loader(config, domain, train=True)
     local_model = build_model(config.model).to(device)
@@ -250,12 +254,7 @@ def run_async_server(config: ExperimentConfig, comm: MPI.Comm, device: torch.dev
 
 def run_async_client(config: ExperimentConfig, comm: MPI.Comm, rank: int, device: torch.device) -> None:
     hostname = socket.gethostname()
-    if "worker2" in hostname:
-        domain = "svhn"
-    elif "slave1" in hostname:
-        domain = "mnist"
-    else:
-        domain = "usps"
+    domain = get_domain_for_hostname(hostname)
         
     loader = make_loader(config, domain, train=True)
     local_model = build_model(config.model).to(device)
@@ -292,32 +291,74 @@ def main() -> None:
     
     if rank == 0:
         print(f"[INIT] Rank {rank} started on host: {hostname} (SERVER)", flush=True)
-    else:
-        if "worker2" in hostname:
-            domain_print = "SVHN"
-        elif "slave1" in hostname:
-            domain_print = "MNIST"
-        else:
-            domain_print = "USPS"
-        print(f"[INIT] Rank {rank} started on host: {hostname} (Dataset: {domain_print})", flush=True)
-
-    if rank > 0:
+    orig_data_dir = config.data_dir
+    if config.use_shared_folder:
+        if rank == 0:
+            print(f"[INIT] Chế độ Shared Folder được bật. Sử dụng trực tiếp data từ: {config.data_dir}", flush=True)
+    elif rank > 0:
         if "worker2" in hostname:
             config.data_dir = "./data"
         else:
             # Dùng /var/tmp thay vì /tmp để dữ liệu không bị xoá khi sập/reset máy ảo
             config.data_dir = "/var/tmp/fl_data"
 
+    if rank > 0:
+        domain_print = get_domain_for_hostname(hostname).upper()
+        print(f"[INIT] Rank {rank} started on host: {hostname} (Dataset: {domain_print})", flush=True)
+
     if config.download:
         local_rank = int(os.environ.get("OMPI_COMM_WORLD_LOCAL_RANK", "0"))
         if local_rank == 0:
-            if "worker2" in hostname:
-                dl_domain = "svhn"
-            elif "slave1" in hostname:
-                dl_domain = "mnist"
-            else:
-                dl_domain = "usps"
+            dl_domain = get_domain_for_hostname(hostname)
+            import shutil
+            t_path = Path(config.data_dir).resolve()
+            o_path = Path(orig_data_dir).resolve()
+            if t_path != o_path and o_path.exists():
+                t_path.mkdir(parents=True, exist_ok=True)
+                patterns = []
+                if dl_domain == "usps":
+                    patterns = ["*usps*", "*USPS*"]
+                elif dl_domain == "svhn":
+                    patterns = ["*svhn*", "*SVHN*", "*32x32.mat"]
+                elif dl_domain == "mnist":
+                    patterns = ["*mnist*", "*MNIST*"]
+
+                copied_any = False
+                for pat in patterns:
+                    for item in o_path.glob(pat):
+                        dest = t_path / item.name
+                        try:
+                            if item.is_dir():
+                                if not dest.exists():
+                                    print(f"[AUTO-COPY] Host {hostname}: Đang chép thư mục '{item.name}' từ shared folder sang {t_path}...", flush=True)
+                                    shutil.copytree(item, dest)
+                                    copied_any = True
+                                    print(f"[AUTO-COPY] Host {hostname}: Chép xong thư mục '{item.name}'!", flush=True)
+                                else:
+                                    copied_any = True
+                                # Đồng thời chép các file bên trong ra ngay ngoài t_path (vì torchvision USPS tìm file ngay ngoài root)
+                                for subfile in item.glob("*"):
+                                    if subfile.is_file():
+                                        subdest = t_path / subfile.name
+                                        if not subdest.exists():
+                                            shutil.copy2(subfile, subdest)
+                            else:
+                                if not dest.exists():
+                                    print(f"[AUTO-COPY] Host {hostname}: Đang chép file '{item.name}' sang {t_path}...", flush=True)
+                                    shutil.copy2(item, dest)
+                                    copied_any = True
+                                    print(f"[AUTO-COPY] Host {hostname}: Chép xong file '{item.name}'!", flush=True)
+                                else:
+                                    copied_any = True
+                        except Exception as e:
+                            print(f"[AUTO-COPY] Cảnh báo khi chép: {e}", flush=True)
+
+                if not copied_any:
+                    print(f"[AUTO-COPY] Host {hostname}: Chưa tìm thấy file/thư mục cho bộ {dl_domain.upper()} trong {o_path}.", flush=True)
+
+            print(f"[PRE-LOAD] Host {hostname} (local_rank 0) đang nạp/kiểm tra dataset {dl_domain.upper()}...", flush=True)
             make_loader(config, dl_domain, train=True)
+            print(f"[PRE-LOAD] Host {hostname} hoàn tất nạp {dl_domain.upper()}.", flush=True)
         comm.Barrier()
 
     if rank == 0:

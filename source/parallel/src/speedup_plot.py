@@ -11,7 +11,8 @@ import os
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--x-cores", type=int, default=4, help="X = physical cores of the machine")
-    parser.add_argument("--n", type=int, default=5000, help="N data size (base steps)")
+    parser.add_argument("--n", type=int, default=30, help="N rounds (communication rounds, same as normal training)")
+    parser.add_argument("--local-steps", type=int, default=100, help="Base local steps per round")
     parser.add_argument("--mpirun", default="mpirun")
     parser.add_argument("--hostfile", default="", help="Path to hostfile for MPI cluster")
     parser.add_argument("--oversubscribe", action="store_true", help="Allow running more processes than physical cores")
@@ -21,13 +22,13 @@ def parse_args():
     parser.add_argument("--plot-only", action="store_true", help="Only plot from previously saved speedup data")
     return parser.parse_args()
 
-def run_experiment(np, total_steps, args):
+def run_experiment(np, total_local_steps, args):
     # Use relative paths to avoid breaking symlinks across different MPI nodes
     log_dir = Path("outputs") / "speedup_check"
     log_dir.mkdir(parents=True, exist_ok=True)
     
     workers = np - 1
-    local_steps = total_steps // workers
+    local_steps = max(1, total_local_steps // workers)
     
     cmd = [
         args.mpirun,
@@ -40,7 +41,7 @@ def run_experiment(np, total_steps, args):
         
     cmd.extend([
         sys.executable, "parallel_fedavg_mpi.py",
-        "--rounds", "3",  # Keep rounds small, we just want to measure speedup of local computation
+        "--rounds", str(args.n),
         "--local-steps", str(local_steps),
         "--log-dir", str(log_dir),
         "--download"
@@ -88,8 +89,9 @@ def main():
     if worker_counts[-1] != max_workers:
         worker_counts.append(max_workers)
         
-    total_data = 2 * args.n
-    print(f"Tổng kích thước dữ liệu mô phỏng = 2*N = {total_data}")
+    total_local_steps = 2 * args.local_steps
+    print(f"Số vòng lặp giao tiếp N (rounds) = {args.n}")
+    print(f"Tổng số bước huấn luyện mỗi vòng (chia đều cho workers) = 2*local_steps = {total_local_steps}")
     print(f"Số lượng nhân vật lý (X) = {X}")
     print(f"Chạy nghiệm với số tiến trình công nhân: {worker_counts}")
     
@@ -117,7 +119,7 @@ def main():
             for w in worker_counts:
                 np_val = w + 1 # Tổng số tiến trình thực tế của MPI = 1 Server + w Workers
                 print(f"\n[*] Đang chạy với {w} workers (Tổng tiến trình MPI={np_val})...")
-                t_total, t_compute = run_experiment(np_val, total_data, args)
+                t_total, t_compute = run_experiment(np_val, total_local_steps, args)
                 times_with_comm.append(t_total)
                 times_without_comm.append(t_compute)
                 actual_worker_counts.append(w)
